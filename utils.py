@@ -78,13 +78,7 @@ def safe_windows_listdir(path: PathString) -> List[str]:
     try:
         return os.listdir(path)
 
-    except PermissionError:
-        return []
-
-    except FileNotFoundError:
-        return []
-
-    except OSError:
+    except (PermissionError, FileNotFoundError, OSError):
         return []
 
 

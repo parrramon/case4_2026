@@ -3,6 +3,7 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 import utils  # Импорт функций архитектора
 
+
 def get_current_drive() -> str:
     """Getting the current Windows drive"""
 
@@ -35,6 +36,10 @@ def list_directory(path: str) -> Tuple[bool, List[Dict[str, Any]]]:
         if not os.path.isdir(path):
             return False, []
 
+        try:
+            os.listdir(path)
+        except OSError:
+            return False, []
     result = []
 
     try:
@@ -123,21 +128,93 @@ def format_directory_output(items: List[Dict[str, Any]], current_path: str = "")
 
 def move_up(current_path: str) -> str:
     """Navigating to the parent directory in Windows"""
-    # TODO: Использовать utils.get_parent_path() для получения родителя
-    # Проверить валидность нового пути через utils.validate_windows_path()
-    # Учесть переход между дисками
-    pass
+
+    parent_path = utils.get_parent_path(current_path)
+
+    if os.path.normpath(parent_path) == os.path.normpath(current_path):
+
+        current_drive = os.path.splitdrive(current_path)[0].upper()
+
+        available_drives = [
+            drive.upper() for drive in list_available_drives()
+        ]
+
+        if len(available_drives) <= 1:
+            return current_path
+
+        if current_drive not in available_drives:
+            return current_path
+
+        current_index = available_drives.index(current_drive)
+
+        next_index = (current_index + 1) % len(available_drives)
+
+        new_path = available_drives[next_index] + os.sep
+
+    else:
+        new_path = parent_path
+
+    is_valid, error = utils.validate_windows_path(new_path)
+
+    if not is_valid:
+        return current_path
+
+    return new_path
+
 
 def move_down(current_path: str, target_dir: str) -> Tuple[bool, str]:
     """Navigating to the specified subdirectory in Windows"""
-    # TODO: Проверить что target_dir существует через utils.safe_windows_listdir()
-    # Сформировать новый путь и проверить через utils.validate_windows_path()
-    # Вернуть (True, новый_путь) при успехе, (False, текущий_путь) при ошибке
-    pass
+
+    items = utils.safe_windows_listdir(current_path)
+
+    # Проверяем, существует ли целевая папка в текущей папке
+    if target_dir.casefold() not in [item.casefold() for item in items]:
+        return False, current_path
+
+    new_path = os.path.join(current_path, target_dir)
+
+    # Проверяем, что путь существует и является папкой
+    if not os.path.isdir(new_path):
+        return False, current_path
+
+    # Проверяем корректность пути
+    is_valid, error = utils.validate_windows_path(new_path)
+
+    if not is_valid:
+        return False, current_path
+
+    # Проверяем доступность содержимого папки
+    items = utils.safe_windows_listdir(new_path)
+
+    if not items:
+        try:
+            os.listdir(new_path)
+        except OSError:
+            return False, current_path
+
+    return True, new_path
+
 
 def get_windows_special_folders() -> Dict[str, str]:
     """Obtaining paths to special Windows folders"""
-    # TODO: Вернуть словарь с путями к папкам:
-    # {'Desktop': 'C:\\Users\\...', 'Documents': '...', 'Downloads': '...'}
-    # Использовать os.environ для получения USERPROFILE и других переменных
-    pass
+
+    user_profile = os.environ.get("USERPROFILE")
+
+    if not user_profile:
+        return {}
+
+    folders = {
+        "Desktop": os.path.join(user_profile, "Desktop"),
+        "Documents": os.path.join(user_profile, "Documents"),
+        "Downloads": os.path.join(user_profile, "Downloads"),
+        "Pictures": os.path.join(user_profile, "Pictures"),
+        "Music": os.path.join(user_profile, "Music"),
+        "Videos": os.path.join(user_profile, "Videos")
+    }
+
+    return {
+        name: path
+        for name, path in folders.items()
+        if os.path.isdir(path)
+    }
+
