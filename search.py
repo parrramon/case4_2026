@@ -1,105 +1,131 @@
-import fnmatch
-import os
-import stat
-from typing import Any, Dict, Iterator, List
-import utils
-import navigation
-import analysis
+import fnmatch, os, stat
+from typing import Any, Dict, List
+import analysis, navigation, utils
 
-def _files_in_directory(path: str) -> Iterator[str]:
-    """Recursively yield file paths using the navigation module."""
-    # Получаем содержимое папки через модуль другого участника.
+def _get_files(path: str) -> List[str]:
+    """Recursively collect file paths from Windows folders."""
+
+    # Получаем содержимое папки через модуль навигации.
     success, items = navigation.list_directory(path)
+
     if not success:
-        return
+        return []
+
+    files = []
 
     for item in items:
         file_path = os.path.join(path, item['name'])
 
-        # Ссылки и junctions пропускаем, чтобы не зациклиться.
-        if os.path.islink(file_path):
+        # Пропускаем ссылки, чтобы не попасть в бесконечный цикл.
+        if os.path.islink(file_path) or os.path.isjunction(file_path):
             continue
 
-        if hasattr(os.path, 'isjunction'):
-            if os.path.isjunction(file_path):
-                continue
-
         if item['type'] == 'file':
-            yield file_path
+            files.append(file_path)
 
         elif item['type'] == 'directory':
-            # Yield from передаёт файлы из вложенной папки наверх.
-            yield from _files_in_directory(file_path)
+            # Вызываем эту же функцию для вложенной папки.
+            files.extend(_get_files(file_path))
 
-def find_files_windows(pattern: str, path: str,
-                       case_sensitive: bool = False) -> List[str]:
-    """Recursively find files matching a Windows wildcard pattern."""
+    return files
 
-    results = []
+def _inside_folder(file_path: str, folder: str) -> bool:
+    """Check whether a file is located inside a folder."""
 
-    # Общее количество нужно для отображения прогресса поиска.
+    # Сравниваем полные пути без учёта регистра Windows.
+    file_path = os.path.normcase(os.path.abspath(file_path))
+    folder = os.path.normcase(os.path.abspath(folder))
+
+    try:
+        return os.path.commonpath([file_path, folder]) == folder
+    except ValueError:
+        # Пути на разных дисках не имеют общего корня.
+        return False
+
+def find_files_windows(pattern: str, path: str, case_sensitive: bool = False) -> List[str]:
+    """Find files by Windows wildcard patterns."""
+
+    # Аналитик считает файлы для отображения прогресса.
     success, total = analysis.count_files(path)
     checked = 0
+    results = []
 
-    for file_path in _files_in_directory(path):
+    if not case_sensitive:
+        pattern = pattern.casefold()
+
+    for file_path in _get_files(path):
         checked += 1
         name = os.path.basename(file_path)
 
-        # По умолчанию Windows-поиск не учитывает регистр.
+        # В Windows поиск обычно не зависит от регистра букв.
         if not case_sensitive:
             name = name.casefold()
-            search_pattern = pattern.casefold()
-        else:
-            search_pattern = pattern
 
-        if fnmatch.fnmatchcase(name, search_pattern):
+        if fnmatch.fnmatchcase(name, pattern):
             results.append(file_path)
 
-        # Выводим прогресс не для каждого файла, а раз в 1000.
-        if success and total and checked % 1000 == 0:
-            print(f"Проверено файлов: {checked} из {total}")
+        if success and checked % 1000 == 0:
+            print(f'Проверено файлов: {checked} из {total}')
 
     if success:
-        print(f"Поиск завершён. Проверено файлов: {checked} из {total}")
+        print(f'Поиск завершён. Проверено файлов: {checked} из {total}')
 
     return results
 
-def find_by_windows_extension(extensions: List[str],
-                              path: str) -> List[str]:
-    """Recursively find files with selected Windows extensions."""
-    # Аналитика заранее собирает статистику по расширениям.
-    success, types = analysis.analyze_windows_file_types(path)
-    if not success:
-        print('Не удалось получить статистику типов файлов.')
+def find_by_windows_extension(extensions: List[str], path: str) -> List[str]:
+    """Find files with selected Windows extensions."""
 
-    # Приводим '.TXT' и 'txt' к одинаковому виду '.txt'.
-    wanted = {'.' + ext.lower().lstrip('.') for ext in extensions}
+    # Приводим расширения к виду '.txt', '.exe' и т. д.
+    wanted = []
+
+    for extension in extensions:
+        extension = extension.strip().lower()
+
+        if not extension:
+            continue
+
+        if not extension.startswith('.'):
+            extension = '.' + extension
+
+        wanted.append(extension)
+
+    if not wanted:
+        return []
+
+    # Проверяем статистику, чтобы избежать ненужного поиска.
+    success, types = analysis.analyze_windows_file_types(path)
+
+    if success and not any(extension in types for extension in wanted):
+        return []
+
     results = []
 
-    for file_path in _files_in_directory(path):
+    for file_path in _get_files(path):
         extension = os.path.splitext(file_path)[1].lower()
+
         if extension in wanted:
             results.append(file_path)
 
     return results
 
-def find_large_files_windows(min_size_mb: float,
-                             path: str) -> List[Dict[str, Any]]:
-    """Recursively find files larger than a given size in MB."""
+def find_large_files_windows(min_size_mb: float, path: str) -> List[Dict[str, Any]]:
+    """Find files at least as large as the given size in MB."""
 
-    results = []
+    # Переводим мегабайты в байты для сравнения размеров.
     minimum = min_size_mb * 1024 * 1024
+    results = []
 
-    # Используем функцию аналитика для общей оценки размера папки.
+    # Если вся папка меньше порога, подходящих файлов нет.
     success, total_bytes = analysis.count_bytes(path)
-    if success:
-        print(f"Общий размер папки: {utils.format_size(total_bytes)}")
 
-    for file_path in _files_in_directory(path):
+    if success and total_bytes < minimum:
+        return []
+
+    for file_path in _get_files(path):
         try:
             size = os.path.getsize(file_path)
         except OSError:
-            # Недоступный файл не должен останавливать поиск.
+            # Недоступные файлы пропускаем.
             continue
 
         if size >= minimum:
@@ -112,155 +138,152 @@ def find_large_files_windows(min_size_mb: float,
     return results
 
 def find_windows_system_files(path: str) -> List[str]:
-    """Find Windows executables and libraries in system folders."""
+    """Find Windows system executables, libraries and drivers."""
 
+    # Учитываем Windows и папки установленных программ.
+    system_folders = [
+        os.environ.get('SystemRoot', 'C:\\Windows'),
+        os.environ.get('ProgramFiles', 'C:\\Program Files'),
+        os.environ.get('ProgramFiles(x86)', 'C:\\Program Files (x86)')
+    ]
+
+    # Пользовательские специальные папки не считаем системными.
+    user_folders = navigation.get_windows_special_folders().values()
+    extensions = ['.exe', '.dll', '.sys']
     results = []
-    extensions = {'.exe', '.dll', '.sys'}
 
-    # Системная папка берётся из Windows, а не из имени диска.
-    windows_dir = os.environ.get('SystemRoot', 'C:\\Windows')
-    system_dirs = [windows_dir]
-
-    # Получаем специальные папки через модуль навигации.
-    special = navigation.get_windows_special_folders()
-    for name, folder in special.items():
-        if name.lower() in {'windows', 'system32', 'syswow64'}:
-            system_dirs.append(folder)
-
-    for file_path in _files_in_directory(path):
+    for file_path in _get_files(path):
         extension = os.path.splitext(file_path)[1].lower()
+
         if extension not in extensions:
             continue
 
-        # Проверяем, лежит ли файл внутри системной папки.
-        in_system_dir = False
-        for folder in system_dirs:
-            try:
-                common = os.path.commonpath([file_path, folder])
-                if os.path.normcase(common) == os.path.normcase(folder):
-                    in_system_dir = True
-                    break
-            except ValueError:
-                # Пути на разных дисках не имеют общего корня.
-                continue
+        in_system_folder = any(_inside_folder(file_path, folder) for folder in system_folders)
+        in_user_folder = any(_inside_folder(file_path, folder) for folder in user_folders)
 
         try:
-            attrs = os.stat(file_path).st_file_attributes
-            system_attr = bool(attrs & stat.FILE_ATTRIBUTE_SYSTEM)
+            attributes = os.stat(file_path).st_file_attributes
+            is_system = bool(attributes & stat.FILE_ATTRIBUTE_SYSTEM)
         except (OSError, AttributeError):
-            system_attr = False
+            is_system = False
 
-        if in_system_dir or system_attr:
+        # Ищем файлы из системных папок или с системным атрибутом.
+        if is_system or (in_system_folder and not in_user_folder):
             results.append(file_path)
 
     return results
 
-def format_windows_search_results(results: List,
-                                  search_type: str) -> None:
-    """Print Windows search results with file sizes and attributes."""
+def format_windows_search_results(results: List, search_type: str) -> None:
+    """Print found files with sizes and Windows attributes."""
 
-    print(f"\nРезультаты поиска: {search_type}")
+    print(f'\nРезультаты поиска: {search_type}')
     print('-' * 50)
 
     if not results:
         print('Ничего не найдено.')
         return
 
-    # Получаем сводку атрибутов через модуль аналитика.
-    paths = [item['path'] if isinstance(item, dict) else item
-             for item in results]
-    folders = {os.path.dirname(file_path) for file_path in paths}
-    for folder in folders:
-        try:
-            stats = analysis.get_windows_file_attributes_stats(folder)
-            print(f"Атрибуты в {folder}: {stats}")
-        except OSError:
-            pass
+    paths = []
 
     for number, item in enumerate(results, 1):
+        # Поиск по размеру возвращает словари, остальные — строки.
         file_path = item['path'] if isinstance(item, dict) else item
+        paths.append(file_path)
+
         try:
             size = utils.format_size(os.path.getsize(file_path))
-            attrs = os.stat(file_path).st_file_attributes
+        except OSError:
+            size = 'Недоступен'
+
+        try:
+            attributes = os.stat(file_path).st_file_attributes
         except (OSError, AttributeError):
-            size = 'недоступен'
-            attrs = 0
+            attributes = 0
 
         flags = []
-        if attrs & stat.FILE_ATTRIBUTE_HIDDEN:
+
+        if utils.is_hidden_windows_file(file_path):
             flags.append('скрытый')
 
-        if attrs & stat.FILE_ATTRIBUTE_SYSTEM:
+        if attributes & stat.FILE_ATTRIBUTE_SYSTEM:
             flags.append('системный')
 
-        if attrs & stat.FILE_ATTRIBUTE_READONLY:
+        if attributes & stat.FILE_ATTRIBUTE_READONLY:
             flags.append('только чтение')
 
-        print(f"{number}. {file_path}")
-        print(f"   Размер: {size}")
+        print(f'{number}. {file_path}')
+        print(f'   Размер: {size}')
 
         if flags:
-            print(f"   Атрибуты: {', '.join(flags)}")
+            flags_text = ', '.join(flags)
+            print(f'   Атрибуты: {flags_text}')
 
-    print(f"Всего найдено: {len(results)}")
+    print(f'Всего найдено: {len(results)}')
+
+    # Показываем общую статистику атрибутов для области поиска.
+    try:
+        folders = [os.path.dirname(file_path) for file_path in paths]
+        common_folder = os.path.commonpath(folders)
+        stats = analysis.get_windows_file_attributes_stats(common_folder)
+        print(f'Атрибуты в папке {common_folder} и её подпапках: {stats}')
+    except ValueError:
+        # Файлы на разных дисках не имеют общего каталога.
+        pass
 
 def search_menu_handler(current_path: str) -> bool:
-    """Show the search menu and run the selected search."""
+    """Run one search menu action and return whether to continue."""
 
-    while True:
-        print('\nПОИСК ФАЙЛОВ')
-        print(f"Папка: {current_path}")
-        print('1. По названию')
-        print('2. По расширению')
-        print('3. По размеру')
-        print('4. Системные файлы')
-        print('5. Статистика папки')
-        print('0. Вернуться в главное меню')
+    # Показываем команды поиска и обрабатываем выбор пользователя.
+    print('\nПОИСК ФАЙЛОВ')
+    print(f'Текущая папка: {current_path}')
+    print('1. По названию')
+    print('2. По расширению')
+    print('3. По размеру')
+    print('4. Системные файлы')
+    print('5. Статистика папки')
+    print('0. Назад')
 
-        choice = input('Команда: ').strip()
+    choice = input('Команда: ').strip()
 
-        match choice:
+    match choice:
+        case '1':
+            pattern = input('Шаблон имени (* и ?): ').strip()
 
-            case '1':
-                pattern = input('Шаблон (* и ?): ').strip()
-                if not pattern:
-                    print('Введите шаблон.')
-                    continue
+            if pattern:
                 results = find_files_windows(pattern, current_path)
                 format_windows_search_results(results, 'по названию')
+            else:
+                print('Введите шаблон.')
 
-            case '2':
-                value = input('Расширения через запятую: ')
-                extensions = [part.strip() for part in value.split(',')
-                              if part.strip()]
-                if not extensions:
-                    print('Введите расширения.')
-                    continue
-                results = find_by_windows_extension(extensions,
-                                                    current_path)
-                format_windows_search_results(results, 'по расширению')
+        case '2':
+            value = input('Расширения через запятую: ')
+            extensions = [item.strip() for item in value.split(',') if item.strip()]
+            results = find_by_windows_extension(extensions, current_path)
+            format_windows_search_results(results, 'по расширению')
 
-            case '3':
-                try:
-                    minimum = float(input('Минимум в МБ: '))
-                    if minimum < 0:
-                        raise ValueError
-                except ValueError:
-                    print('Введите неотрицательное число.')
-                    continue
-                results = find_large_files_windows(minimum,
-                                                   current_path)
+        case '3':
+            try:
+                minimum = float(input('Минимальный размер в МБ: '))
+
+                if minimum < 0:
+                    raise ValueError
+
+                results = find_large_files_windows(minimum, current_path)
                 format_windows_search_results(results, 'по размеру')
+            except ValueError:
+                print('Введите неотрицательное число.')
 
-            case '4':
-                results = find_windows_system_files(current_path)
-                format_windows_search_results(results, 'системные файлы')
+        case '4':
+            results = find_windows_system_files(current_path)
+            format_windows_search_results(results, 'системные файлы')
 
-            case '5':
-                analysis.show_windows_directory_stats(current_path)
+        case '5':
+            analysis.show_windows_directory_stats(current_path)
 
-            case '0':
-                return True
+        case '0':
+            return False
 
-            case _:
-                print('Неизвестная команда.')
+        case _:
+            print('Неизвестная команда.')
+
+    return True
