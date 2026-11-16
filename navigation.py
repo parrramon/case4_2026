@@ -3,12 +3,15 @@ from datetime import datetime
 from typing import List, Dict, Any, Tuple
 import utils  # Импорт функций архитектора
 
+"""Stage 1."""
+
 
 def get_current_drive() -> str:
     """Getting the current Windows drive"""
-
+    # Узнаём, в какой папке сейчас запущена программа
     current_path = os.getcwd()
 
+    # Получаем название диска
     drive, _ = os.path.splitdrive(current_path)
 
     return drive
@@ -16,22 +19,25 @@ def get_current_drive() -> str:
 
 def list_available_drives() -> List[str]:
     """Obtaining a list of available Windows drives"""
-
+    # Проверяем, что программа запущена на Windows
     if not utils.is_windows_os():
         return []
 
     try:
+        # Получаем список доступных дисков
         return [drive.rstrip("\\") for drive in os.listdrives()]
 
     except OSError:
+        # Возвращаем пустой список при ошибке
         return []
 
 
 def list_directory(path: str) -> Tuple[bool, List[Dict[str, Any]]]:
     """Displaying the contents of a directory in Windows"""
-
+    # Получаем содержимое папки
     items = utils.safe_windows_listdir(path)
 
+    # Проверяем, существует ли папка и доступна ли она для чтения
     if not items:
         if not os.path.isdir(path):
             return False, []
@@ -40,15 +46,20 @@ def list_directory(path: str) -> Tuple[bool, List[Dict[str, Any]]]:
             os.listdir(path)
         except OSError:
             return False, []
+
+    # Создаём список для хранения информации о файлах и папках
     result = []
 
     try:
         for name in items:
+            # Формируем полный путь к элементу
             full_path = os.path.join(path, name)
 
             try:
+                # Получаем информацию о файле или папке
                 file_info = os.stat(full_path)
 
+                # Формируем словарь с характеристиками элемента
                 item = {
                     'name': name,
                     'type': 'directory' if os.path.isdir(full_path) else 'file',
@@ -131,6 +142,7 @@ def move_up(current_path: str) -> str:
 
     parent_path = utils.get_parent_path(current_path)
 
+    # Проверяем, находимся ли уже в корне диска
     if os.path.normpath(parent_path) == os.path.normpath(current_path):
 
         current_drive = os.path.splitdrive(current_path)[0].upper()
